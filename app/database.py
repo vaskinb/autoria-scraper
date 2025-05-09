@@ -8,10 +8,12 @@ from typing import Any, Dict, Optional, Type, TypeVar
 # -----------------------------------------------------------------------------
 # --- SQLAlchemy ---
 # -----------------------------------------------------------------------------
-from sqlalchemy import create_engine, inspect
-from sqlalchemy.orm import sessionmaker, Session, DeclarativeBase
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy import inspect
+from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.ext.declarative import declared_attr
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.exc import SQLAlchemyError
 
 # -----------------------------------------------------------------------------
 # --- App ---
@@ -26,8 +28,12 @@ T = TypeVar('T')
 # -----------------------------------------------------------------------------
 # --- Create SQLAlchemy engine ---
 # -----------------------------------------------------------------------------
-engine = create_engine(DB_URL, echo=False, pool_pre_ping=True)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+async_engine = create_async_engine(
+    DB_URL, echo=False, pool_pre_ping=True
+)
+AsyncSessionLocal = async_sessionmaker(
+    async_engine, autocommit=False, autoflush=False, expire_on_commit=False
+)
 
 
 class Base(DeclarativeBase):
@@ -45,54 +51,63 @@ class Base(DeclarativeBase):
 class DatabaseManager:
 
     @staticmethod
-    def get_session() -> Session:
-        session = SessionLocal()
+    async def get_async_session() -> AsyncSession:
+        """Get async session"""
+        session = AsyncSessionLocal()
         try:
             return session
         except SQLAlchemyError as error:
-            session.close()
-            logger.error(f"Database session error: {error}")
+            await session.close()
+            logger.error(f"Async database session error: {error}")
             raise
 
     @staticmethod
-    def create_tables() -> None:
-        """Create all tables defined in models"""
+    async def create_tables_async() -> None:
+        """Create all tables defined in models (async)"""
         try:
-            Base.metadata.create_all(bind=engine)
-            logger.info("Database tables created successfully")
+            async with async_engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            logger.info("Database tables created successfully (async)")
         except SQLAlchemyError as error:
-            logger.error(f"Error creating database tables: {error}")
+            logger.error(f"Error creating database tables (async): {error}")
             raise
 
     @staticmethod
-    def add_item(item: Base) -> Optional[Base]:
-        """Add a single item to the database"""
-        logger.debug(f"Adding item {item.to_dict()}")
+    async def add_item_async(item: Base) -> Optional[Base]:
+        """Add a single item to the database (async)"""
+        logger.debug(f"Adding item asynchronously {item.to_dict()}")
 
-        session = DatabaseManager.get_session()
+        session = await DatabaseManager.get_async_session()
         try:
             session.add(item)
-            session.commit()
-            session.refresh(item)
+            await session.commit()
+            await session.refresh(item)
             return item
         except SQLAlchemyError as error:
-            session.rollback()
-            logger.error(f"Error adding item to database: {error}")
+            await session.rollback()
+            logger.error(f"Error adding item to database (async): {error}")
             return None
         finally:
-            session.close()
+            await session.close()
 
     @staticmethod
-    def exists_by_field(model: Type[T], field_name: str, value: Any) -> bool:
-        """Check if item exists"""
-        session = DatabaseManager.get_session()
+    async def exists_by_field_async(
+            model: Type[T], field_name: str, value: Any
+    ) -> bool:
+        """Check if item exists (async)"""
+        session = await DatabaseManager.get_async_session()
         try:
-            exists = session.query(model).filter(
-                getattr(model, field_name) == value
-            ).first() is not None
+            stmt = (
+                model.__table__.select()
+                .where(getattr(model, field_name) == value)
+                .limit(1)
+            )
+            result = await session.execute(stmt)
+            exists = result.first() is not None
             return exists
         except SQLAlchemyError as error:
-            logger.error(f"Error checking existence in database: {error}")
+            logger.error(
+                f"Error checking existence in database (async): {error}")
             return False
         finally:
-            session.close()
+            await session.close()

@@ -2,7 +2,7 @@
 # coding: utf-8
 from app.scraper.autoria_scraper import AutoRiaScraper
 from app.scraper.utils import (
-    clean_text, extract_number, get_random_delay, save_to_json, save_to_csv,
+    clean_text, extract_number, get_random_delay, create_db_dump,
     get_timestamp,
 )
 
@@ -14,7 +14,6 @@ __all__ = [
     'clean_text',
     'extract_number',
     'get_random_delay',
-    'save_to_json',
-    'save_to_csv',
+    'create_db_dump',
     'get_timestamp',
 ]

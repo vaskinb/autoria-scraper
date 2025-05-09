@@ -1,10 +1,9 @@
 #!/usr/bin/env python
 # coding: utf-8
-import csv
-import json
 import os
 import random
 import re
+import subprocess
 from datetime import datetime
 
 # -----------------------------------------------------------------------------
@@ -15,7 +14,7 @@ from typing import Any, Dict, List, Optional
 # -----------------------------------------------------------------------------
 # --- App ---
 # -----------------------------------------------------------------------------
-from app.config import logger
+from app.config import logger, BACKUP_URL
 
 
 def clean_text(text: str) -> str:
@@ -62,6 +61,7 @@ def extract_number(text: str) -> Optional[float]:
 
     return None
 
+
 def get_random_delay(base_delay: float) -> float:
     # -------------------------------------------------------------------------
     # --- Add random offset in range of ±30% of base delay ---
@@ -70,41 +70,7 @@ def get_random_delay(base_delay: float) -> float:
     return max(0.5, base_delay + offset)
 
 
-def save_to_json(data: List[Dict[str, Any]], filename: str) -> None:
-    try:
-        # ---------------------------------------------------------------------
-        # --- Ensure directory exists ---
-        # ---------------------------------------------------------------------
-        os.makedirs("dumps", exist_ok=True)
-
-        # ---------------------------------------------------------------------
-        # --- Full path to file ---
-        # ---------------------------------------------------------------------
-        filepath = os.path.join("dumps", filename)
-
-        # ---------------------------------------------------------------------
-        # --- Convert datetime objects to strings ---
-        # ---------------------------------------------------------------------
-        serializable_data = []
-        for item in data:
-            serializable_item = item.copy()
-            for key, value in serializable_item.items():
-                if isinstance(value, datetime):
-                    serializable_item[key] = value.isoformat()
-            serializable_data.append(serializable_item)
-
-        # ---------------------------------------------------------------------
-        # --- Save to file ---
-        # ---------------------------------------------------------------------
-        with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump(serializable_data, f, ensure_ascii=False, indent=2)
-
-        logger.info(f"Data saved to {filepath}")
-    except Exception as error:
-        logger.error(f"Error saving data to JSON: {error}")
-
-
-def save_to_csv(data: List[Dict[str, Any]], filename: str) -> None:
+def create_db_dump(filename: str) -> bool:
     try:
         # ---------------------------------------------------------------------
         # --- Ensure directory exists ---
@@ -117,35 +83,37 @@ def save_to_csv(data: List[Dict[str, Any]], filename: str) -> None:
         filepath = os.path.join("dumps", filename)
 
         # ---------------------------------------------------------------------
-        # --- Convert datetime objects to strings ---
+        # --- Create pg_dump command ---
         # ---------------------------------------------------------------------
-        serializable_data = []
-        for item in data:
-            serializable_item = item.copy()
-            for key, value in serializable_item.items():
-                if isinstance(value, datetime):
-                    serializable_item[key] = value.isoformat()
-            serializable_data.append(serializable_item)
+        cmd = [
+            'pg_dump',
+            f'--dbname={BACKUP_URL}',
+            '--clean',
+            '--if-exists',
+            f'--file={filepath}'
+        ]
 
         # ---------------------------------------------------------------------
-        # --- Get fieldnames from first item ---
+        # --- Execute pg_dump command ---
         # ---------------------------------------------------------------------
-        if serializable_data:
-            fieldnames = list(serializable_data[0].keys())
+        result = subprocess.run(cmd, capture_output=True, text=True)
 
-            # -----------------------------------------------------------------
-            # --- Save to file ---
-            # -----------------------------------------------------------------
-            with open(filepath, 'w', encoding='utf-8', newline='') as f:
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
-                writer.writeheader()
-                writer.writerows(serializable_data)
-
-            logger.info(f"Data saved to {filepath}")
+        # ---------------------------------------------------------------------
+        # --- Check result and log output ---
+        # ---------------------------------------------------------------------
+        if result.returncode == 0:
+            logger.info(f"Database dump successfully created at {filepath}")
+            return True
         else:
-            logger.warning("No data to save to CSV")
+            logger.error(f"Error during database dump: {result.stderr}")
+            return False
+
     except Exception as error:
-        logger.error(f"Error saving data to CSV: {error}")
+        # ---------------------------------------------------------------------
+        # --- Handle unexpected errors ---
+        # ---------------------------------------------------------------------
+        logger.exception(f"Unexpected error during database dump: {error}")
+        return False
 
 
 def get_timestamp() -> str:

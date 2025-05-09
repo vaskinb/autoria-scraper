@@ -137,7 +137,7 @@ docker-compose exec app python -m app.main --run-now
 
 
 ```bash
-docker-compose exec app python -m scripts.backup
+docker-compose exec app python -m app.main --backup
 ```
 
 ### Зміна часу запуску

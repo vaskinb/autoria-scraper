@@ -4,6 +4,7 @@
 # --- Typing ---
 # -----------------------------------------------------------------------------
 from typing import Callable, Optional
+import asyncio
 
 # -----------------------------------------------------------------------------
 # --- Apscheduler ---
@@ -26,6 +27,11 @@ class ScraperScheduler:
         self.scheduler.start()
         logger.info("Scheduler initialized")
 
+    def _wrap_async_job(self, job_func: Callable) -> Callable:
+        def wrapper():
+            asyncio.get_event_loop().create_task(job_func())
+        return wrapper
+
     def add_daily_job(
             self, job_func: Callable, job_time: Optional[str] = None
     ) -> None:
@@ -41,8 +47,8 @@ class ScraperScheduler:
         # --- Add job with cron trigger ---
         # ---------------------------------------------------------------------
         self.scheduler.add_job(
-            job_func,
-            CronTrigger(hour=int(hour), minute=int(minute)),
+            self._wrap_async_job(job_func),
+            CronTrigger(hour=hour, minute=minute),
             id="daily_scraper",
             replace_existing=True
         )
@@ -58,7 +64,7 @@ class ScraperScheduler:
         hour, minute = job_time.split(":")
 
         self.scheduler.add_job(
-            job_func,
+            self._wrap_async_job(job_func),
             CronTrigger(hour=int(hour), minute=int(minute)),
             id="daily_backup",
             replace_existing=True
@@ -68,7 +74,7 @@ class ScraperScheduler:
 
     def add_interval_job(self, job_func: Callable, hours: int = 24) -> None:
         self.scheduler.add_job(
-            job_func,
+            self._wrap_async_job(job_func),
             IntervalTrigger(hours=hours),
             id="interval_scraper",
             replace_existing=True
@@ -78,7 +84,17 @@ class ScraperScheduler:
 
     def run_immediately(self, job_func: Callable) -> None:
         logger.info("Running scraper job immediately")
-        job_func()
+
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+        if loop.is_running():
+            loop.create_task(job_func())
+        else:
+            loop.run_until_complete(job_func())
 
     def shutdown(self) -> None:
         self.scheduler.shutdown()

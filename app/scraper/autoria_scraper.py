@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 # coding: utf-8
 import re
-import time
 import math
+import asyncio
 from datetime import datetime
 
 # -----------------------------------------------------------------------------
@@ -13,17 +13,20 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 # -----------------------------------------------------------------------------
 # --- Parsers ---
 # -----------------------------------------------------------------------------
-import requests
+import aiohttp
 from bs4 import BeautifulSoup
 from fake_useragent import UserAgent
-from playwright.sync_api import Browser, BrowserContext, Page, sync_playwright
+from playwright.async_api import (
+    Browser, BrowserContext, Page, async_playwright
+)
 from tenacity import retry, stop_after_attempt, wait_fixed
 
 # -----------------------------------------------------------------------------
 # --- App ---
 # -----------------------------------------------------------------------------
 from app.config import (
-    HEADERS, REQUEST_DELAY, REQUEST_TIMEOUT, START_URL, logger
+    HEADERS, REQUEST_DELAY, REQUEST_TIMEOUT, START_URL, logger,
+    CAR_SEMAPHORE_VALUE, PAGE_SEMAPHORE_VALUE
 )
 from app.database import DatabaseManager
 from app.models import Car
@@ -39,38 +42,55 @@ class AutoRiaScraper:
         self.timeout = REQUEST_TIMEOUT
         self.delay = REQUEST_DELAY
         self.processed_urls: Set[str] = set()
-        self.session = requests.Session()
+        self.session = None
         self.context = None
+        self.browser = None
+        self.playwright = None
+        self._pagination_urls = []
+
+        logger.info("AutoRiaScraper with async Playwright initialized")
+
+    async def initialize(self):
+        """Initialize aiohttp session and Playwright browser"""
+        # --- Init aiohttp session ---
+        self.session = aiohttp.ClientSession(headers=self.headers)
 
         # --- Init Playwright ---
-        self.playwright = sync_playwright().start()
-        self.browser = self.playwright.chromium.launch(headless=True)
-        self.rotate_user_agent()
+        self.playwright = await async_playwright().start()
+        self.browser = await self.playwright.chromium.launch(headless=True)
+        await self.rotate_user_agent()
 
-        logger.info("AutoRiaScraper with Playwright initialized")
+    async def __aenter__(self):
+        await self.initialize()
+        return self
 
-    def __del__(self):
-        self._close_playwright_resources()
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self._close_resources()
 
-    def _close_playwright_resources(self):
+    async def _close_resources(self):
+        """Close all async resources"""
         try:
-            if hasattr(self, 'context') and self.context:
-                self.context.close()
-            if hasattr(self, 'browser') and self.browser:
-                self.browser.close()
-            if hasattr(self, 'playwright') and self.playwright:
-                self.playwright.stop()
+            if self.session:
+                await self.session.close()
+            if self.context:
+                await self.context.close()
+            if self.browser:
+                await self.browser.close()
+            if self.playwright:
+                await self.playwright.stop()
+            logger.debug("All async resources closed")
         except Exception as error:
-            logger.error(f"Error closing Playwright resources: {error}")
+            logger.error(f"Error closing async resources: {error}")
 
-    def rotate_user_agent(self) -> None:
+    async def rotate_user_agent(self) -> None:
+        """Rotate user agent to avoid detection"""
         try:
             ua = UserAgent()
             self.headers["User-Agent"] = ua.random
-            if hasattr(self, 'context') and self.context:
-                self.context.close()
+            if self.context:
+                await self.context.close()
 
-            self.context = self.browser.new_context(
+            self.context = await self.browser.new_context(
                 user_agent=self.headers["User-Agent"],
                 viewport={"width": 1920, "height": 1080}
             )
@@ -79,7 +99,7 @@ class AutoRiaScraper:
         except Exception as error:
             logger.warning(f"Failed to rotate User-Agent: {error}.")
 
-    def fetch_page_with_playwright(self, url: str) -> Optional[Tuple[
+    async def fetch_page_with_playwright(self, url: str) -> Optional[Tuple[
         Optional[Page], Optional[BeautifulSoup]]
     ]:
         """Fetch a page using Playwright and return page and soup objects"""
@@ -88,19 +108,19 @@ class AutoRiaScraper:
             # -----------------------------------------------------------------
             # --- Create a new page ---
             # -----------------------------------------------------------------
-            page = self.context.new_page()
+            page = await self.context.new_page()
 
             # -----------------------------------------------------------------
             # --- Navigate to URL ---
             # -----------------------------------------------------------------
-            page.goto(
+            await page.goto(
                 url, timeout=self.timeout * 1000, wait_until="networkidle"
             )
 
             # -----------------------------------------------------------------
             # --- Get page content ---
             # -----------------------------------------------------------------
-            content = page.content()
+            content = await page.content()
 
             # -----------------------------------------------------------------
             # --- Parse with BeautifulSoup ---
@@ -111,20 +131,20 @@ class AutoRiaScraper:
         except Exception as error:
             logger.error(f"Error fetching {url}: {error}")
             if page:
-                page.close()
+                await page.close()
             return None, None
         finally:
-            time.sleep(get_random_delay(self.delay))
+            await asyncio.sleep(get_random_delay(self.delay))
 
-    def fetch_page(self, url: str) -> Optional[BeautifulSoup]:
+    async def fetch_page(self, url: str) -> Optional[BeautifulSoup]:
         """Fetch page and return BeautifulSoup object"""
-        page, soup = self.fetch_page_with_playwright(url)
+        page, soup = await self.fetch_page_with_playwright(url)
         if page:
-            page.close()
+            await page.close()
         return soup
 
     @staticmethod
-    def get_pagination(soup: BeautifulSoup) -> Tuple[int, int, int]:
+    def get_pagination(soup: BeautifulSoup) -> int:
         """ Calculate pagination params """
         try:
             # -----------------------------------------------------------------
@@ -170,11 +190,11 @@ class AutoRiaScraper:
                 total_count / items_per_page) if total_count > 0 else 0
             logger.info(f"Total pages to process: {total_pages}")
 
-            return total_count, items_per_page, total_pages
+            return total_pages
 
         except Exception as error:
             logger.error(f"Error calculating pagination: {error}")
-            return 0, 20, 0  # Default values
+            return 0
 
     def get_pagination_urls(self, soup: BeautifulSoup) -> List[str]:
         """ Generate pagination URLs """
@@ -183,9 +203,7 @@ class AutoRiaScraper:
             # -----------------------------------------------------------------
             # --- Calculate pagination params ---
             # -----------------------------------------------------------------
-            total_count, items_per_page, total_pages = self.get_pagination(
-                soup
-            )
+            total_pages = self.get_pagination(soup)
 
             if total_pages <= 0:
                 logger.warning("No pages to process")
@@ -194,31 +212,13 @@ class AutoRiaScraper:
             # -----------------------------------------------------------------
             # --- Generate pagination URLs ---
             # -----------------------------------------------------------------
-            base_url = self.start_url
-
-            # -----------------------------------------------------------------
-            # --- Remove existing page parameter ---
-            # -----------------------------------------------------------------
-            if "?" in base_url:
-                base_parts = base_url.split("?")
-                base_url = base_parts[0]
-                params = base_parts[1].split("&")
-                filtered_params = [
-                    p for p in params if not p.startswith("page=")
-                ]
-                if filtered_params:
-                    base_url = f"{base_url}?{'&'.join(filtered_params)}"
-
-            # -----------------------------------------------------------------
-            # --- Add page parameter connector ---
-            # -----------------------------------------------------------------
-            connector = "&" if "?" in base_url else "?"
+            base_url = self._prepare_base_url()
 
             # -----------------------------------------------------------------
             # --- Generate URLs for pages ---
             # -----------------------------------------------------------------
             for page_num in range(2, total_pages + 1):
-                page_url = f"{base_url}{connector}page={page_num}"
+                page_url = f"{base_url}page={page_num}"
                 pagination_urls.append(page_url)
 
         except Exception as error:
@@ -226,6 +226,29 @@ class AutoRiaScraper:
 
         logger.info(f"Generated {len(pagination_urls)} pagination URLs")
         return pagination_urls
+
+    def _prepare_base_url(self) -> str:
+        """Prepare base URL for pagination"""
+        base_url = self.start_url
+
+        # ---------------------------------------------------------------------
+        # --- Remove existing page parameter ---
+        # ---------------------------------------------------------------------
+        if "?" in base_url:
+            base_parts = base_url.split("?")
+            base_url = base_parts[0]
+            params = base_parts[1].split("&")
+            filtered_params = [
+                p for p in params if not p.startswith("page=")
+            ]
+            if filtered_params:
+                base_url = f"{base_url}?{'&'.join(filtered_params)}"
+
+        # ---------------------------------------------------------------------
+        # --- Add page parameter connector ---
+        # ---------------------------------------------------------------------
+        connector = "&" if "?" in base_url else "?"
+        return f"{base_url}{connector}"
 
     def get_car_links(self, soup: BeautifulSoup) -> List[str]:
         """Extract car links from soup"""
@@ -258,37 +281,33 @@ class AutoRiaScraper:
         logger.debug(f"Found {len(car_links)} car links on page")
         return car_links
 
-    @staticmethod
-    def extract_phone_number(page: Page) -> Optional[str]:
-        """Extract phone number from car page"""
+    async def extract_phone_number(self, page: Page) -> Optional[str]:
+        """Extract phone number from car page (async version)"""
         try:
-            logger.debug("Clicking on show phone button")
+            logger.debug(
+                "Extracting phone number - clicking on show phone button")
             # -----------------------------------------------------------------
             # --- Get show phone link ---
             # -----------------------------------------------------------------
-            show_phone_link = page.query_selector(
-                'a.phone_show_link'
-            )
+            show_phone_link = page.locator('a.phone_show_link').first
             if show_phone_link:
                 try:
                     # ---------------------------------------------------------
                     # --- Click show link ---
                     # ---------------------------------------------------------
-                    show_phone_link.click(timeout=1000)
+                    await show_phone_link.click(timeout=1000)
 
                     # ---------------------------------------------------------
                     # --- Wait for popup ---
                     # ---------------------------------------------------------
-                    page.wait_for_timeout(2000)
+                    await page.wait_for_timeout(2000)
                 except Exception as error:
-                    logger.error(
-                        f"Error clicking show phone link: {error}"
-                    )
+                    logger.error(f"Error clicking show phone link: {error}")
 
             # -----------------------------------------------------------------
             # --- Get content after click ---
             # -----------------------------------------------------------------
-            content = page.content()
+            content = await page.content()
             soup = BeautifulSoup(content, 'lxml')
 
             # -----------------------------------------------------------------
@@ -299,113 +318,47 @@ class AutoRiaScraper:
                 phone_match = pattern.search(tag)
                 if phone_match:
                     phone_text = phone_match.group(0)
-                    phone = re.sub(r'[^\d+]', '', phone_text)
-                    if not phone.startswith('+'):
-                        phone = '+38' + phone
-                    return phone
+                    phone_number = re.sub(r'[^\d+]', '', phone_text)
+                    if not phone_number.startswith('+'):
+                        phone_number = '+38' + phone_number
+                    return phone_number
 
-            logger.warning("Could not found phone number")
+            logger.warning("Could not find phone number")
             return None
 
         except Exception as error:
             logger.error(f"Error extracting phone: {str(error)}")
             return None
 
-    def parse_car_details(self, url: str) -> Optional[Dict[str, Any]]:
+    async def parse_car_details(self, url: str) -> Optional[Dict[str, Any]]:
         """Parse car details from page"""
-        page, soup = self.fetch_page_with_playwright(url)
+        page, soup = await self.fetch_page_with_playwright(url)
         if not page or not soup:
             return None
 
         try:
-            # -----------------------------------------------------------------
-            # --- Extract title ---
-            # -----------------------------------------------------------------
-            title = clean_text(
-                soup.find('h1', class_='head').text
-                if soup.find('h1', class_='head') else ""
-            )
-
-            # -----------------------------------------------------------------
-            # --- Extract price ---
-            # -----------------------------------------------------------------
-            price_usd = None
-            price_elem = soup.find('div', class_='price_value')
-            if price_elem:
-                price_text = price_elem.find('strong')
-                if price_text:
-                    price_usd = extract_number(price_text.text)
-
-            # -----------------------------------------------------------------
-            # --- Extract odometer ---
-            # -----------------------------------------------------------------
-            odometer = None
-            odometer_elem = soup.find('div', class_='base-information')
-
-            if odometer_elem and 'тис. км' in odometer_elem.text:
-                match = re.search(r'(\d+)\s*тис\. км', odometer_elem.text)
-                if match:
-                    odometer = int(match.group(1)) * 1000
-
-            # -----------------------------------------------------------------
-            # --- Extract username ---
-            # -----------------------------------------------------------------
-            username_elem = soup.find('div', class_='seller_info_name')
-            username = clean_text(
-                username_elem.text
-            ) if username_elem else None
-
-            # -----------------------------------------------------------------
-            # --- Extract phone ---
-            # -----------------------------------------------------------------
-            phone_number = self.extract_phone_number(page)
-
-            # -----------------------------------------------------------------
-            # --- Extract images ---
-            # -----------------------------------------------------------------
-            image_url = None
-            images_count = 0
-            gallery = soup.find('div', class_='gallery-order')
-            if gallery:
-                images = gallery.find_all('img')
-                images_count = len(images)
-                if images_count > 0:
-                    image_url = images[0].get('src')
-
-            # -----------------------------------------------------------------
-            # --- Extract car number ---
-            # -----------------------------------------------------------------
-            car_number = None
-            number_elem = soup.find('span', class_='state-num')
-            if number_elem:
-                car_number = clean_text(number_elem.contents[0])
-
-            # -----------------------------------------------------------------
-            # --- Extract VIN ---
-            # -----------------------------------------------------------------
-            car_vin = None
-            vin_elem = soup.find('span', class_='label-vin')
-            if vin_elem:
-                car_vin = clean_text(vin_elem.text)
-
-            # -----------------------------------------------------------------
-            # --- Create car details dict ---
-            # -----------------------------------------------------------------
             car_details = {
                 'url': url,
-                'title': title,
-                'price_usd': price_usd,
-                'odometer': odometer,
-                'username': username,
-                'phone_number': phone_number,
-                'image_url': image_url,
-                'images_count': images_count,
-                'car_number': car_number,
-                'car_vin': car_vin,
                 'datetime_found': datetime.now()
             }
 
-            logger.debug(f"Parsed car details for {url}: {title}")
+            # -----------------------------------------------------------------
+            # --- Extract basic car info ---
+            # -----------------------------------------------------------------
+            car_details.update(self._extract_basic_info(soup))
+
+            # -----------------------------------------------------------------
+            # --- Extract phone - must be on the same page (important!) ---
+            # -----------------------------------------------------------------
+            car_details['phone_number'] = await self.extract_phone_number(page)
+
+            # -----------------------------------------------------------------
+            # --- Extract additional car info ---
+            # -----------------------------------------------------------------
+            car_details.update(self._extract_additional_info(soup))
+
+            logger.debug(
+                f"Parsed car details for {url}: {car_details['title']}")
 
             return car_details
 
@@ -414,16 +367,100 @@ class AutoRiaScraper:
             return None
         finally:
             if page:
-                page.close()
+                await page.close()
+
+    def _extract_basic_info(self, soup: BeautifulSoup) -> Dict[str, Any]:
+        """Extract basic car information from the page"""
+        basic_info = {}
+
+        # -----------------------------------------------------------------
+        # --- Extract title ---
+        # -----------------------------------------------------------------
+        title = clean_text(
+            soup.find('h1', class_='head').text
+            if soup.find('h1', class_='head') else ""
+        )
+        basic_info['title'] = title
+
+        # -----------------------------------------------------------------
+        # --- Extract price ---
+        # -----------------------------------------------------------------
+        price_usd = None
+        price_elem = soup.find('div', class_='price_value')
+        if price_elem:
+            price_text = price_elem.find('strong')
+            if price_text:
+                price_usd = extract_number(price_text.text)
+        basic_info['price_usd'] = price_usd
+
+        # -----------------------------------------------------------------
+        # --- Extract odometer ---
+        # -----------------------------------------------------------------
+        odometer = None
+        odometer_elem = soup.find('div', class_='base-information')
+
+        if odometer_elem and 'тис. км' in odometer_elem.text:
+            match = re.search(r'(\d+)\s*тис\. км', odometer_elem.text)
+            if match:
+                odometer = int(match.group(1)) * 1000
+        basic_info['odometer'] = odometer
+
+        # -----------------------------------------------------------------
+        # --- Extract username ---
+        # -----------------------------------------------------------------
+        username_elem = soup.find('div', class_='seller_info_name')
+        username = clean_text(username_elem.text) if username_elem else None
+        basic_info['username'] = username
+
+        return basic_info
 
     @staticmethod
-    def save_car_to_db(car_data: Dict[str, Any]) -> bool:
+    def _extract_additional_info(soup: BeautifulSoup) -> Dict[str, Any]:
+        """Extract additional car information from the page"""
+        additional_info = {}
+
+        # -----------------------------------------------------------------
+        # --- Extract images ---
+        # -----------------------------------------------------------------
+        image_url = None
+        images_count = 0
+        gallery = soup.find('div', class_='gallery-order')
+        if gallery:
+            images = gallery.find_all('img')
+            images_count = len(images)
+            if images_count > 0:
+                image_url = images[0].get('src')
+        additional_info['image_url'] = image_url
+        additional_info['images_count'] = images_count
+
+        # -----------------------------------------------------------------
+        # --- Extract car number ---
+        # -----------------------------------------------------------------
+        car_number = None
+        number_elem = soup.find('span', class_='state-num')
+        if number_elem:
+            car_number = clean_text(number_elem.contents[0])
+        additional_info['car_number'] = car_number
+
+        # -----------------------------------------------------------------
+        # --- Extract VIN ---
+        # -----------------------------------------------------------------
+        car_vin = None
+        vin_elem = soup.find('span', class_='label-vin')
+        if vin_elem:
+            car_vin = clean_text(vin_elem.text)
+        additional_info['car_vin'] = car_vin
+
+        return additional_info
+
+    @staticmethod
+    async def save_car_to_db(car_data: Dict[str, Any]) -> bool:
         """ Save car data to db """
         try:
             # -----------------------------------------------------------------
             # --- Check if car already exists ---
             # -----------------------------------------------------------------
-            exists = DatabaseManager.exists_by_field(
+            exists = await DatabaseManager.exists_by_field_async(
                 Car, 'url', car_data['url']
             )
             if exists:
@@ -440,7 +477,7 @@ class AutoRiaScraper:
             # -----------------------------------------------------------------
             # --- Save to database ---
             # -----------------------------------------------------------------
-            result = DatabaseManager.add_item(car)
+            result = await DatabaseManager.add_item_async(car)
 
             if result:
                 logger.info(f"Car saved to database: {car_data['title']}")
@@ -454,7 +491,7 @@ class AutoRiaScraper:
             logger.error(f"Error saving car to database: {error}")
             return False
 
-    def process_car_page(self, url: str) -> bool:
+    async def process_car_page(self, url: str) -> bool:
         """Process a single car page"""
         # ---------------------------------------------------------------------
         # --- Skip if already processed ---
@@ -470,16 +507,71 @@ class AutoRiaScraper:
         # ---------------------------------------------------------------------
         # --- Parse car details ---
         # ---------------------------------------------------------------------
-        car_data = self.parse_car_details(url)
+        car_data = await self.parse_car_details(url)
         if not car_data:
             return False
 
         # ---------------------------------------------------------------------
         # --- Save to database ---
         # ---------------------------------------------------------------------
-        return self.save_car_to_db(car_data)
+        return await self.save_car_to_db(car_data)
 
-    def run(self) -> Tuple[int, int]:
+    async def process_car_with_semaphore(
+            self, url: str, semaphore: asyncio.Semaphore
+    ) -> bool:
+        """Process a car URL with semaphore control"""
+        async with semaphore:
+            return await self.process_car_page(url)
+
+    async def process_pagination_page(
+            self, page_url: str, car_semaphore: asyncio.Semaphore
+    ) -> int:
+        """Process a pagination page and its car listings"""
+        logger.info(f"Processing page: {page_url}")
+
+        # -----------------------------------------------------------------
+        # --- Fetch page ---
+        # -----------------------------------------------------------------
+        soup = await self.fetch_page(page_url)
+        if not soup:
+            logger.warning(f"Could not fetch page: {page_url}")
+            return 0
+
+        # -----------------------------------------------------------------
+        # --- Get car links ---
+        # -----------------------------------------------------------------
+        car_links = self.get_car_links(soup)
+
+        # -----------------------------------------------------------------
+        # --- Process car links concurrently ---
+        # -----------------------------------------------------------------
+        tasks = [
+            self.process_car_with_semaphore(link, car_semaphore)
+            for link in car_links
+        ]
+        car_results = await asyncio.gather(*tasks)
+
+        page_cars_saved = sum(1 for result in car_results if result)
+
+        # -----------------------------------------------------------------
+        # --- Rotate user agent if we saved cars ---
+        # -----------------------------------------------------------------
+        if page_cars_saved > 0:
+            await self.rotate_user_agent()
+
+        logger.info(f"Page {page_url} processed, saved {page_cars_saved} cars")
+        return page_cars_saved
+
+    async def process_pagination_page_with_semaphore(
+            self, url: str, car_semaphore: asyncio.Semaphore,
+            page_semaphore: asyncio.Semaphore
+    ) -> int:
+        """Process a pagination page with semaphore control"""
+        async with page_semaphore:
+            return await self.process_pagination_page(url, car_semaphore)
+
+    @retry(stop=stop_after_attempt(3), wait=wait_fixed(5))
+    async def run(self) -> Optional[Tuple[int, int]]:
         """Run the scraper"""
         logger.info("Starting AutoRIA scrapper")
 
@@ -488,83 +580,40 @@ class AutoRiaScraper:
 
         try:
             # -----------------------------------------------------------------
-            # --- Start with the initial URL ---
+            # --- Initialize resources if not already done ---
             # -----------------------------------------------------------------
-            current_url = self.start_url
-
-            # -----------------------------------------------------------------
-            # --- Fetch start page ---
-            # -----------------------------------------------------------------
-            soup = self.fetch_page(current_url)
-            if not soup:
-                logger.error("Could not fetch the start page")
-                return pages_processed, cars_saved
-
-            pages_processed += 1
-
-            # -----------------------------------------------------------------
-            # --- Get pagination URLs ---
-            # -----------------------------------------------------------------
-            pagination_urls = self.get_pagination_urls(soup)
+            if not self.session or not self.browser:
+                await self.initialize()
 
             # -----------------------------------------------------------------
             # --- Process start page ---
             # -----------------------------------------------------------------
-            car_links = self.get_car_links(soup)
-            for car_link in car_links:
-                if self.process_car_page(car_link):
-                    cars_saved += 1
-
-                # -------------------------------------------------------------
-                # --- Rotate user agent ---
-                # -------------------------------------------------------------
-                if cars_saved % 10 == 0:
-                    self.rotate_user_agent()
-
-            logger.info(
-                f"Processed start page, "
-                f"found {len(car_links)} cars, saved {cars_saved}."
-            )
+            start_page_cars = await self._process_start_page()
+            cars_saved += start_page_cars
+            pages_processed += 1
 
             # -----------------------------------------------------------------
-            # --- Process remaining pages ---
+            # --- Process remaining pages concurrently ---
             # -----------------------------------------------------------------
-            for page_url in pagination_urls:
-                logger.info(
-                    f"Processing page {pages_processed + 1}: {page_url}")
+            car_semaphore = asyncio.Semaphore(CAR_SEMAPHORE_VALUE)
+            page_semaphore = asyncio.Semaphore(PAGE_SEMAPHORE_VALUE)
 
-                # -------------------------------------------------------------
-                # --- Fetch page ---
-                # -------------------------------------------------------------
-                soup = self.fetch_page(page_url)
-                if not soup:
-                    logger.warning(f"Could not fetch page: {page_url}")
-                    continue
+            # -----------------------------------------------------------------
+            # --- Process pages with semaphore control ---
+            # -----------------------------------------------------------------
+            tasks = [
+                self.process_pagination_page_with_semaphore(
+                    url, car_semaphore, page_semaphore)
+                for url in self._pagination_urls
+            ]
 
-                pages_processed += 1
+            results = await asyncio.gather(*tasks)
 
-                # --------------------------------------------------------------
-                # --- Get car links ---
-                # -------------------------------------------------------------
-                car_links = self.get_car_links(soup)
-
-                for car_link in car_links:
-                    # ---------------------------------------------------------
-                    # --- Process car page ---
-                    # ---------------------------------------------------------
-                    if self.process_car_page(car_link):
-                        cars_saved += 1
-
-                    # ---------------------------------------------------------
-                    # --- Rotate user agent ---
-                    # ---------------------------------------------------------
-                    if cars_saved % 10 == 0:
-                        self.rotate_user_agent()
-
-                logger.info(
-                    f"Processed {pages_processed} pages, "
-                    f"saved {cars_saved} cars."
-                )
+            # -----------------------------------------------------------------
+            # --- Calc processed pages ---
+            # -----------------------------------------------------------------
+            pages_processed += len(self._pagination_urls)
+            cars_saved += sum(results)
 
             logger.info(
                 f"AutoRIA scraper finished. "
@@ -576,8 +625,50 @@ class AutoRiaScraper:
             logger.error(f"Error in scraper run: {error}")
         finally:
             # -----------------------------------------------------------------
-            # --- Close Playwright resources ---
+            # --- Close async resources ---
             # -----------------------------------------------------------------
-            self._close_playwright_resources()
+            await self._close_resources()
 
         return pages_processed, cars_saved
+
+    async def _process_start_page(self) -> int:
+        """Process the initial page"""
+        # ---------------------------------------------------------------------
+        # --- Fetch start page ---
+        # ---------------------------------------------------------------------
+        soup = await self.fetch_page(self.start_url)
+        if not soup:
+            logger.info("Could not fetch the start page")
+            return 0
+
+        # ---------------------------------------------------------------------
+        # --- Get pagination URLs for later ---
+        # ---------------------------------------------------------------------
+        self._pagination_urls = self.get_pagination_urls(soup)
+
+        # ---------------------------------------------------------------------
+        # --- Process car links from start page ---
+        # ---------------------------------------------------------------------
+        car_links = self.get_car_links(soup)
+
+        # ---------------------------------------------------------------------
+        # --- Process cars with concurrency ---
+        # ---------------------------------------------------------------------
+        car_semaphore = asyncio.Semaphore(CAR_SEMAPHORE_VALUE)
+
+        tasks = [
+            self.process_car_with_semaphore(link, car_semaphore)
+            for link in car_links
+        ]
+        results = await asyncio.gather(*tasks)
+
+        # ---------------------------------------------------------------------
+        # --- Calc processed cars ---
+        # ---------------------------------------------------------------------
+        cars_saved = sum(1 for result in results if result)
+        logger.info(
+            f"Processed start page, found {len(car_links)} cars, "
+            f"saved {cars_saved}."
+        )
+
+        return cars_saved

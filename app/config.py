@@ -22,7 +22,9 @@ DB_NAME = os.getenv("DB_NAME", "autoria_db")
 # -----------------------------------------------------------------------------
 # --- Connection string ---
 # -----------------------------------------------------------------------------
-DB_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+DB_URL = f"postgresql+asyncpg://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+BACKUP_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+
 
 # -----------------------------------------------------------------------------
 # --- Scraper config ---
@@ -33,6 +35,8 @@ BACKUP_RUN_TIME = os.getenv("BACKUP_RUN_TIME", "23:00")
 USER_AGENT = os.getenv("USER_AGENT", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "30"))
 REQUEST_DELAY = int(os.getenv("REQUEST_DELAY", "2"))
+CAR_SEMAPHORE_VALUE = int(os.getenv("REQUEST_TIMEOUT", "5"))
+PAGE_SEMAPHORE_VALUE = int(os.getenv("REQUEST_DELAY", "3"))
 
 # -----------------------------------------------------------------------------
 # --- Headers for HTTP requests ---
