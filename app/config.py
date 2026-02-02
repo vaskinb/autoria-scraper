@@ -34,9 +34,9 @@ SCRAPER_RUN_TIME = os.getenv("SCRAPER_RUN_TIME", "12:00")
 BACKUP_RUN_TIME = os.getenv("BACKUP_RUN_TIME", "23:00")
 USER_AGENT = os.getenv("USER_AGENT", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "30"))
-REQUEST_DELAY = int(os.getenv("REQUEST_DELAY", "2"))
-CAR_SEMAPHORE_VALUE = int(os.getenv("REQUEST_TIMEOUT", "5"))
-PAGE_SEMAPHORE_VALUE = int(os.getenv("REQUEST_DELAY", "3"))
+REQUEST_DELAY = int(os.getenv("REQUEST_DELAY", "5"))
+CAR_SEMAPHORE_VALUE = int(os.getenv("CAR_SEMAPHORE_VALUE", "3"))
+PAGE_SEMAPHORE_VALUE = int(os.getenv("PAGE_SEMAPHORE_VALUE", "2"))
 
 # -----------------------------------------------------------------------------
 # --- Headers for HTTP requests ---

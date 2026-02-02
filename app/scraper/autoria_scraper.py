@@ -52,10 +52,14 @@ class AutoRiaScraper:
 
     async def initialize(self):
         """Initialize aiohttp session and Playwright browser"""
+        # ---------------------------------------------------------------------
         # --- Init aiohttp session ---
+        # ---------------------------------------------------------------------
         self.session = aiohttp.ClientSession(headers=self.headers)
 
+        # ---------------------------------------------------------------------
         # --- Init Playwright ---
+        # ---------------------------------------------------------------------
         self.playwright = await async_playwright().start()
         self.browser = await self.playwright.chromium.launch(headless=True)
         await self.rotate_user_agent()
@@ -284,12 +288,11 @@ class AutoRiaScraper:
     async def extract_phone_number(self, page: Page) -> Optional[str]:
         """Extract phone number from car page (async version)"""
         try:
-            logger.debug(
-                "Extracting phone number - clicking on show phone button")
-            # -----------------------------------------------------------------
-            # --- Get show phone link ---
-            # -----------------------------------------------------------------
-            show_phone_link = page.locator('a.phone_show_link').first
+            show_phone_link = page.locator(
+                "//button[@data-action='showBottomPopUp' and "
+                "contains(@class, 'conversion')]"
+            ).first
+
             if show_phone_link:
                 try:
                     # ---------------------------------------------------------
@@ -311,19 +314,21 @@ class AutoRiaScraper:
             soup = BeautifulSoup(content, 'lxml')
 
             # -----------------------------------------------------------------
-            # --- Find number with regex ---
+            # --- Find number inside link within the modal context ---
             # -----------------------------------------------------------------
-            pattern = re.compile(r'\(\d{3}\)\s*\d{3}\s*\d{2}\s*\d{2}')
-            for tag in soup.find_all(text=pattern):
-                phone_match = pattern.search(tag)
-                if phone_match:
-                    phone_text = phone_match.group(0)
-                    phone_number = re.sub(r'[^\d+]', '', phone_text)
-                    if not phone_number.startswith('+'):
-                        phone_number = '+38' + phone_number
-                    return phone_number
+            phone_link = soup.find('a', href=re.compile(r'^tel:\(\d{3}\)'))
 
-            logger.warning("Could not find phone number")
+            if phone_link and phone_link.get('href'):
+                phone_raw = phone_link.get('href').replace('tel:', '')
+                phone_number = re.sub(r'[^\d+]', '', phone_raw)
+                if not phone_number.startswith('+'):
+                    phone_number = '+38' + phone_number
+                logger.info(
+                    f"Phone number extracted from modal link: {phone_number}")
+                return phone_number
+
+            logger.warning(
+                "Could not find phone number link after modal open.")
             return None
 
         except Exception as error:
@@ -334,6 +339,7 @@ class AutoRiaScraper:
         """Parse car details from page"""
         page, soup = await self.fetch_page_with_playwright(url)
         if not page or not soup:
+            logger.error(f"Failed to fetch or parse soup for URL: {url}")
             return None
 
         try:
@@ -345,17 +351,25 @@ class AutoRiaScraper:
             # -----------------------------------------------------------------
             # --- Extract basic car info ---
             # -----------------------------------------------------------------
-            car_details.update(self._extract_basic_info(soup))
+            basic_info = self._extract_basic_info(soup)
+            if not basic_info.get('title'):
+                logger.warning(f"Title not found for URL: {url}")
+            car_details.update(basic_info)
 
             # -----------------------------------------------------------------
-            # --- Extract phone - must be on the same page (important!) ---
+            # --- Extract phone ---
             # -----------------------------------------------------------------
             car_details['phone_number'] = await self.extract_phone_number(page)
+            if not car_details['phone_number']:
+                logger.warning(f"Phone number not extracted for URL: {url}")
 
             # -----------------------------------------------------------------
             # --- Extract additional car info ---
             # -----------------------------------------------------------------
-            car_details.update(self._extract_additional_info(soup))
+            additional_info = self._extract_additional_info(soup)
+            car_details.update(additional_info)
+            if not additional_info.get('car_vin'):
+                logger.debug(f"VIN not found for URL: {url}")
 
             logger.debug(
                 f"Parsed car details for {url}: {car_details['title']}")
@@ -376,41 +390,54 @@ class AutoRiaScraper:
         # -----------------------------------------------------------------
         # --- Extract title ---
         # -----------------------------------------------------------------
-        title = clean_text(
-            soup.find('h1', class_='head').text
-            if soup.find('h1', class_='head') else ""
-        )
+        title_tag = soup.find('h1', class_='titleL')
+        title = clean_text(title_tag.text) if title_tag else ""
         basic_info['title'] = title
+        if not title:
+            logger.debug("Basic info: Title element not found using titleL.")
 
         # -----------------------------------------------------------------
         # --- Extract price ---
         # -----------------------------------------------------------------
         price_usd = None
-        price_elem = soup.find('div', class_='price_value')
+        price_elem = soup.find('strong', class_='titleL')
         if price_elem:
-            price_text = price_elem.find('strong')
-            if price_text:
-                price_usd = extract_number(price_text.text)
+            price_usd = extract_number(price_elem.text)
         basic_info['price_usd'] = price_usd
+        if price_usd is None:
+            logger.debug(
+                "Basic info: Price USD element not found or failed extraction."
+            )
 
         # -----------------------------------------------------------------
         # --- Extract odometer ---
         # -----------------------------------------------------------------
         odometer = None
-        odometer_elem = soup.find('div', class_='base-information')
+        base_info_block = soup.find('div', id='basicInfoTableMainInfo')
 
-        if odometer_elem and 'тис. км' in odometer_elem.text:
-            match = re.search(r'(\d+)\s*тис\. км', odometer_elem.text)
+        if base_info_block:
+            odometer_text = base_info_block.text
+            match = re.search(r'(\d+)\s*тис\. км', odometer_text)
             if match:
                 odometer = int(match.group(1)) * 1000
+            else:
+                logger.debug("Basic info: Odometer text format unexpected.")
+        else:
+            logger.debug("Basic info: Basic info block not found.")
+
         basic_info['odometer'] = odometer
 
         # -----------------------------------------------------------------
         # --- Extract username ---
         # -----------------------------------------------------------------
-        username_elem = soup.find('div', class_='seller_info_name')
-        username = clean_text(username_elem.text) if username_elem else None
+        username_elem_side = soup.find('div', id='sellerInfoUserName')
+        username = clean_text(
+            username_elem_side.text) if username_elem_side else None
         basic_info['username'] = username
+        if not username:
+            logger.debug(
+                "Basic info: Username element not found in side column."
+            )
 
         return basic_info
 
@@ -424,12 +451,19 @@ class AutoRiaScraper:
         # -----------------------------------------------------------------
         image_url = None
         images_count = 0
-        gallery = soup.find('div', class_='gallery-order')
+        gallery = soup.find('div', class_='photo-slider')
         if gallery:
             images = gallery.find_all('img')
             images_count = len(images)
             if images_count > 0:
-                image_url = images[0].get('src')
+                main_img = gallery.find('img', loading='eager')
+                if main_img and main_img.get('src'):
+                    image_url = main_img.get('src')
+            if not image_url:
+                logger.debug("Main image source not found.")
+        else:
+            logger.debug("Photo slider block not found.")
+
         additional_info['image_url'] = image_url
         additional_info['images_count'] = images_count
 
@@ -437,18 +471,39 @@ class AutoRiaScraper:
         # --- Extract car number ---
         # -----------------------------------------------------------------
         car_number = None
-        number_elem = soup.find('span', class_='state-num')
+        number_elem = soup.find('div', class_='car-number')
         if number_elem:
-            car_number = clean_text(number_elem.contents[0])
+            try:
+                span = number_elem.find('span')
+                if span:
+                    car_number = clean_text(span.get_text(strip=True))
+                else:
+                    logger.debug("Car number span not found.")
+            except Exception as error:
+                logger.error(
+                    f"Error extracting car number text structure: {error}"
+                )
+        else:
+            logger.debug("Car number element not found.")
+
         additional_info['car_number'] = car_number
 
         # -----------------------------------------------------------------
         # --- Extract VIN ---
         # -----------------------------------------------------------------
         car_vin = None
-        vin_elem = soup.find('span', class_='label-vin')
-        if vin_elem:
-            car_vin = clean_text(vin_elem.text)
+        vin_badge = soup.find('span', id='badgesVervin')
+        if vin_badge:
+            vin_text = vin_badge.find(
+                'span', class_='badge', style=re.compile(
+                    'color:var\\(--inverse\\)'
+                )
+            )
+            if vin_text:
+                car_vin = clean_text(vin_text.text)
+        else:
+            logger.debug("VIN badge element not found.")
+
         additional_info['car_vin'] = car_vin
 
         return additional_info
@@ -484,7 +539,8 @@ class AutoRiaScraper:
                 return True
             else:
                 logger.warning(
-                    f"Failed to save car to database: {car_data['title']}")
+                    f"Failed to save car to database: {car_data['title']}"
+                )
                 return False
 
         except Exception as error:
@@ -529,22 +585,22 @@ class AutoRiaScraper:
         """Process a pagination page and its car listings"""
         logger.info(f"Processing page: {page_url}")
 
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         # --- Fetch page ---
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         soup = await self.fetch_page(page_url)
         if not soup:
             logger.warning(f"Could not fetch page: {page_url}")
             return 0
 
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         # --- Get car links ---
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         car_links = self.get_car_links(soup)
 
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         # --- Process car links concurrently ---
-        # -----------------------------------------------------------------
+        # --------------------------------------------------------------------
         tasks = [
             self.process_car_with_semaphore(link, car_semaphore)
             for link in car_links
@@ -553,9 +609,9 @@ class AutoRiaScraper:
 
         page_cars_saved = sum(1 for result in car_results if result)
 
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         # --- Rotate user agent if we saved cars ---
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         if page_cars_saved > 0:
             await self.rotate_user_agent()
 

@@ -162,6 +162,11 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
+Встановлення браузерів Playwright:
+```bash
+playwright install chromium
+```
+
 3. Створення локальної бази даних PostgreSQL (або оновіть налаштування в `.env`).
 
 ```
