@@ -133,3 +133,6 @@ Template/
 # temperary files
 dumps/
 logs/
+
+# PyCharm / IntelliJ
+.idea/
