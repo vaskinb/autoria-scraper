@@ -8,9 +8,7 @@ from typing import Any, Dict, Optional, Type, TypeVar
 # -----------------------------------------------------------------------------
 # --- SQLAlchemy ---
 # -----------------------------------------------------------------------------
-from sqlalchemy import inspect
-from sqlalchemy.orm import DeclarativeBase
-from sqlalchemy.ext.declarative import declared_attr
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlalchemy.exc import SQLAlchemyError
@@ -19,6 +17,7 @@ from sqlalchemy.exc import SQLAlchemyError
 # --- App ---
 # -----------------------------------------------------------------------------
 from app.config import DB_URL, logger
+from app.models import Base, Car
 
 # -----------------------------------------------------------------------------
 # --- Type variable for ORM model classes ---
@@ -34,18 +33,6 @@ async_engine = create_async_engine(
 AsyncSessionLocal = async_sessionmaker(
     async_engine, autocommit=False, autoflush=False, expire_on_commit=False
 )
-
-
-class Base(DeclarativeBase):
-
-    @declared_attr
-    def __tablename__(cls) -> str:
-        return cls.__name__.lower()
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert model instance to dictionary"""
-        return {c.key: getattr(self, c.key) for c in
-                inspect(self).mapper.column_attrs}
 
 
 class DatabaseManager:
@@ -87,6 +74,42 @@ class DatabaseManager:
             await session.rollback()
             logger.error(f"Error adding item to database (async): {error}")
             return None
+        finally:
+            await session.close()
+
+    @staticmethod
+    async def update_car_by_url_async(
+            url: str, car_data: Dict[str, Any]
+    ) -> bool:
+        """Update car item by its URL (async)"""
+        session = await DatabaseManager.get_async_session()
+        try:
+            # -----------------------------------------------------------------
+            # --- Do not update primary key or creation date ---
+            # -----------------------------------------------------------------
+            car_data.pop('url', None)
+            car_data.pop('datetime_found', None)
+
+            # -----------------------------------------------------------------
+            # --- Create and execute update statement ---
+            # -----------------------------------------------------------------
+            stmt = update(Car).where(Car.url == url).values(**car_data)
+            result = await session.execute(stmt)
+            await session.commit()
+
+            # -----------------------------------------------------------------
+            # --- Check if any row was updated ---
+            # -----------------------------------------------------------------
+            if result.rowcount > 0:
+                logger.info(f"Car {url} updated successfully.")
+                return True
+            else:
+                logger.warning(f"Car {url} not found for update.")
+                return False
+        except SQLAlchemyError as error:
+            await session.rollback()
+            logger.error(f"Error updating car {url} (async): {error}")
+            return False
         finally:
             await session.close()
 

@@ -36,7 +36,7 @@ from app.scraper.utils import (
 
 
 class AutoRiaScraper:
-    def __init__(self) -> None:
+    def __init__(self, full_update: bool = False) -> None:
         self.start_url = START_URL
         self.headers = HEADERS.copy()
         self.timeout = REQUEST_TIMEOUT
@@ -46,9 +46,12 @@ class AutoRiaScraper:
         self.context = None
         self.browser = None
         self.playwright = None
+        self.full_update = full_update
         self._pagination_urls = []
 
         logger.info("AutoRiaScraper with async Playwright initialized")
+        if self.full_update:
+            logger.info("Full update mode is enabled.")
 
     async def initialize(self):
         """Initialize aiohttp session and Playwright browser"""
@@ -324,11 +327,13 @@ class AutoRiaScraper:
                 if not phone_number.startswith('+'):
                     phone_number = '+38' + phone_number
                 logger.info(
-                    f"Phone number extracted from modal link: {phone_number}")
+                    f"Phone number extracted from modal link: {phone_number}"
+                )
                 return phone_number
 
             logger.warning(
-                "Could not find phone number link after modal open.")
+                "Could not find phone number link after modal open."
+            )
             return None
 
         except Exception as error:
@@ -488,9 +493,9 @@ class AutoRiaScraper:
 
         additional_info['car_number'] = car_number
 
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         # --- Extract VIN ---
-        # -----------------------------------------------------------------
+        # ---------------------------------------------------------------------
         car_vin = None
         vin_badge = soup.find('span', id='badgesVervin')
         if vin_badge:
@@ -508,40 +513,41 @@ class AutoRiaScraper:
 
         return additional_info
 
-    @staticmethod
-    async def save_car_to_db(car_data: Dict[str, Any]) -> bool:
-        """ Save car data to db """
+    async def save_car_to_db(self, car_data: Dict[str, Any]) -> bool:
+        """ Save or update car data in the db """
         try:
+            # -----------------------------------------------------------------
+            # --- Validate essential data ---
+            # -----------------------------------------------------------------
+            if not car_data.get('title') or not car_data.get('price_usd'):
+                logger.warning(
+                    f"Incomplete data for {car_data['url']}. Skipping."
+                )
+                return False
+
             # -----------------------------------------------------------------
             # --- Check if car already exists ---
             # -----------------------------------------------------------------
             exists = await DatabaseManager.exists_by_field_async(
                 Car, 'url', car_data['url']
             )
+
             if exists:
-                logger.debug(
-                    f"Car {car_data['url']} already exists in database"
-                )
-                return False
-
-            # -----------------------------------------------------------------
-            # --- Create car object ---
-            # -----------------------------------------------------------------
-            car = Car(**car_data)
-
-            # -----------------------------------------------------------------
-            # --- Save to database ---
-            # -----------------------------------------------------------------
-            result = await DatabaseManager.add_item_async(car)
-
-            if result:
-                logger.info(f"Car saved to database: {car_data['title']}")
-                return True
+                if self.full_update:
+                    logger.info(f"Updating car in database: {car_data['url']}")
+                    return await DatabaseManager.update_car_by_url_async(
+                        car_data['url'], car_data
+                    )
+                else:
+                    logger.debug(
+                        f"Car {car_data['url']} already exists. Skipping."
+                    )
+                    return False
             else:
-                logger.warning(
-                    f"Failed to save car to database: {car_data['title']}"
-                )
-                return False
+                logger.info(f"Saving new car to database: {car_data['title']}")
+                car = Car(**car_data)
+                result = await DatabaseManager.add_item_async(car)
+                return result is not None
 
         except Exception as error:
             logger.error(f"Error saving car to database: {error}")
@@ -554,6 +560,16 @@ class AutoRiaScraper:
         # ---------------------------------------------------------------------
         if url in self.processed_urls:
             return False
+
+        # ---------------------------------------------------------------------
+        # --- Skip if exists in DB and not in full_update mode ---
+        # ---------------------------------------------------------------------
+        if not self.full_update:
+            exists = await DatabaseManager.exists_by_field_async(Car, 'url', url)
+            if exists:
+                logger.debug(f"Skipping existing car (not full update): {url}")
+                self.processed_urls.add(url)
+                return False
 
         # ---------------------------------------------------------------------
         # --- Mark as processed ---
@@ -674,7 +690,7 @@ class AutoRiaScraper:
             logger.info(
                 f"AutoRIA scraper finished. "
                 f"Total: {pages_processed} pages processed, "
-                f"{cars_saved} cars saved."
+                f"{cars_saved} cars saved/updated."
             )
 
         except Exception as error:
@@ -724,7 +740,7 @@ class AutoRiaScraper:
         cars_saved = sum(1 for result in results if result)
         logger.info(
             f"Processed start page, found {len(car_links)} cars, "
-            f"saved {cars_saved}."
+            f"saved/updated {cars_saved}."
         )
 
         return cars_saved

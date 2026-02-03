@@ -8,14 +8,23 @@ from datetime import datetime
 from typing import Any, Dict
 
 # -----------------------------------------------------------------------------
-# --- AQLAlchemy ---
+# --- SQLAlchemy ---
 # -----------------------------------------------------------------------------
-from sqlalchemy import Column, DateTime, Float, Integer, String
+from sqlalchemy import Column, DateTime, Float, Integer, String, inspect
+from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.ext.declarative import declared_attr
 
-# -----------------------------------------------------------------------------
-# --- App ---
-# -----------------------------------------------------------------------------
-from app.database import Base
+
+class Base(DeclarativeBase):
+
+    @declared_attr
+    def __tablename__(cls) -> str:
+        return cls.__name__.lower()
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert model instance to dictionary"""
+        return {c.key: getattr(self, c.key) for c in
+                inspect(self).mapper.column_attrs}
 
 
 class Car(Base):

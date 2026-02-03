@@ -100,14 +100,14 @@ async def test_initial_scrape_and_first_car() -> None:
         )
 
 
-async def run_scraper() -> None:
+async def run_scraper(full_update: bool = False) -> None:
     """Run scraper job"""
     try:
         logger.info("Starting scraper job...")
         # ---------------------------------------------------------------------
         # --- Create scraper instance ---
         # ---------------------------------------------------------------------
-        async with AutoRiaScraper() as scraper:
+        async with AutoRiaScraper(full_update=full_update) as scraper:
             logger.info("AutoRiaScraper instance created")
 
             # -----------------------------------------------------------------
@@ -128,7 +128,7 @@ async def run_scraper() -> None:
             )
             logger.info(
                 f"Processed {pages_processed} pages, "
-                f"saved {cars_saved} new cars"
+                f"saved/updated {cars_saved} cars"
             )
 
     except Exception as error:
@@ -170,6 +170,10 @@ def parse_args() -> argparse.Namespace:
         '--run-now', action='store_true', help='Run scraper immediately'
     )
     parser.add_argument(
+        '--full-update', action='store_true',
+        help='Update all cars, even existing ones'
+    )
+    parser.add_argument(
         '--schedule', type=str, help='Set custom schedule time (HH:MM)'
     )
     parser.add_argument(
@@ -192,7 +196,7 @@ async def main_async() -> None:
         logger.info(
             f"Command line arguments: run_now={args.run_now}, "
             f"schedule={args.schedule}, backup={args.backup}, "
-            f"test_run={args.test_run}"
+            f"test_run={args.test_run}, full_update={args.full_update}"
         )
 
         # ---------------------------------------------------------------------
@@ -247,7 +251,7 @@ async def main_async() -> None:
         # ---------------------------------------------------------------------
         if args.run_now:
             logger.info("Running scraper immediately as requested")
-            await run_scraper()
+            await run_scraper(full_update=args.full_update)
 
         # ---------------------------------------------------------------------
         # --- Keep the main event loop alive ---
@@ -258,7 +262,7 @@ async def main_async() -> None:
                 await asyncio.sleep(1)
         except KeyboardInterrupt:
             logger.info("Shutting down...")
-            await scheduler.shutdown()
+            scheduler.shutdown()
 
     except Exception as error:
         logger.error(f"Application error: {error}", exc_info=True)
