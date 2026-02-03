@@ -112,7 +112,7 @@ docker-compose up -d
 - `db`: База даних PostgreSQL
 
 ### Запуск повного оновлення бази
-# Оновлює дані про всі автомобілі, навіть якщо вони вже є в базі
+Оновлює дані про всі автомобілі, навіть якщо вони вже є в базі
 
 ```bash
 docker-compose exec app python -m app.main --run-now --full-update
@@ -120,7 +120,7 @@ docker-compose exec app python -m app.main --run-now --full-update
 
 
 ### Діагностичний запуск
-# Перевіряє доступність сайту, пагінацію та парсинг першого оголошення без збереження в БД
+Перевіряє доступність сайту, пагінацію та парсинг першого оголошення без збереження в БД
 
 ```bash
 docker-compose exec app python -m app.main --test-run
